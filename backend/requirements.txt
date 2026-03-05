@@ -12,3 +12,4 @@ psycopg2-binary==2.9.9
 google-auth==2.35.0
 google-auth-oauthlib==1.2.1
 google-api-python-client==2.144.0
+openai==2.23.0

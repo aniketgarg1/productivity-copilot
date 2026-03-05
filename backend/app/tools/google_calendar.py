@@ -4,16 +4,20 @@ from datetime import datetime, timedelta, timezone
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
+from zoneinfo import ZoneInfo
+from app.tools.google_oauth import SCOPES
 
 def creds_from_json(token_json: str) -> Credentials:
     data = json.loads(token_json)
+
+    # Always enforce the app's required scopes (not whatever was stored earlier)
     return Credentials(
         token=data.get("token"),
         refresh_token=data.get("refresh_token"),
         token_uri=data.get("token_uri"),
         client_id=data.get("client_id"),
         client_secret=data.get("client_secret"),
-        scopes=data.get("scopes"),
+        scopes=SCOPES,
     )
 
 
@@ -43,3 +47,23 @@ def freebusy(token_json: str, time_min_iso: str, time_max_iso: str) -> dict:
     service = build_calendar_service(token_json)
     body = {"timeMin": time_min_iso, "timeMax": time_max_iso, "items": [{"id": "primary"}]}
     return service.freebusy().query(body=body).execute()
+
+def create_event(token_json: str, summary: str, description: str, start_dt: datetime, end_dt: datetime, timezone: str) -> dict:
+    service = build_calendar_service(token_json)
+
+    tz = ZoneInfo(timezone)
+    # ensure timezone-aware
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=tz)
+    if end_dt.tzinfo is None:
+        end_dt = end_dt.replace(tzinfo=tz)
+
+    event = {
+        "summary": summary,
+        "description": description,
+        "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone},
+        "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
+    }
+
+    created = service.events().insert(calendarId="primary", body=event).execute()
+    return {"id": created.get("id"), "htmlLink": created.get("htmlLink")}

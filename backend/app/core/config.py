@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_ID: str | None = None
     GOOGLE_CLIENT_SECRET: str | None = None
     GOOGLE_REDIRECT_PATH: str = "/auth/google/callback"
-
+    TIMEZONE: str = "America/Phoenix"
+    WORKDAY_START_HOUR: int = 9
+    WORKDAY_END_HOUR: int = 18
+    SLOT_PADDING_MINUTES: int = 5
 
 settings = Settings()

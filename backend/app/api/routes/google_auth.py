@@ -14,7 +14,8 @@ router = APIRouter(prefix="/auth/google")
 
 def _serializer():
     return URLSafeSerializer(settings.SESSION_SECRET, salt="google-oauth-state")
-
+def _user_serializer():
+    return URLSafeSerializer(settings.SESSION_SECRET, salt="pc-user-session")
 
 @router.get("/start")
 async def start_google_oauth(response: Response):
@@ -66,12 +67,33 @@ async def google_oauth_callback(
     db.add(GoogleToken(email=email, token_json=token_json))
     db.commit()
 
-    resp = Response(content="Google account connected. You can close this tab.")
+    from fastapi.responses import RedirectResponse
+
+    frontend_url = "http://localhost:3000/dashboard"
+    resp = RedirectResponse(url=frontend_url, status_code=302)
     resp.delete_cookie("oauth_state")
+
+    signed_user = _user_serializer().dumps({"email": email})
+    resp.set_cookie(
+        "pc_user",
+        signed_user,
+        httponly=True,
+        samesite="lax",
+    )
     return resp
 
 
 @router.get("/status")
-def status(db: Session = Depends(get_db)):
-    tok = db.query(GoogleToken).first()
-    return {"connected": bool(tok), "email": tok.email if tok else None}
+def status(request: Request, db: Session = Depends(get_db)):
+    cookie = request.cookies.get("pc_user")
+    if not cookie:
+        return {"connected": False, "email": None}
+
+    try:
+        data = _user_serializer().loads(cookie)
+        email = data.get("email")
+    except Exception:
+        return {"connected": False, "email": None}
+
+    tok = db.query(GoogleToken).filter(GoogleToken.email == email).first()
+    return {"connected": bool(tok), "email": email if tok else None}

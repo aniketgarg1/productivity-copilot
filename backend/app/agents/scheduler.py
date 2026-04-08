@@ -75,11 +75,13 @@ def flatten_tasks(roadmap: Dict[str, Any]) -> List[Task]:
     tasks: List[Task] = []
     for ms in roadmap.get("milestones", []):
         for t in ms.get("tasks", []):
-            tasks.append(Task(
+            task = Task(
                 title=t["title"],
                 minutes=int(t["estimate_minutes"]),
                 notes=t.get("notes", ""),
-            ))
+            )
+            task.resources = t.get("resources", [])
+            tasks.append(task)
     return tasks
 
 
@@ -87,10 +89,11 @@ def schedule_tasks_into_slots(
     tasks: List[Task],
     free_slots_by_day: List[Tuple[datetime, datetime]],
     timezone: str,
+    max_daily_minutes: int = 120,
 ) -> List[Dict[str, Any]]:
     """
-    First-fit: take earliest free slot, place tasks sequentially.
-    Adds SLOT_PADDING_MINUTES between tasks.
+    First-fit scheduling with a daily time cap.
+    Spreads tasks across days so users aren't overloaded.
     """
     tz = ZoneInfo(timezone)
     padding = timedelta(minutes=settings.SLOT_PADDING_MINUTES)
@@ -98,16 +101,24 @@ def schedule_tasks_into_slots(
     scheduled = []
     slot_idx = 0
     cur_start = None
+    daily_used: Dict[date, int] = {}
 
     while tasks and slot_idx < len(free_slots_by_day):
         slot_start, slot_end = free_slots_by_day[slot_idx]
         slot_start = slot_start.astimezone(tz)
         slot_end = slot_end.astimezone(tz)
 
+        current_day = slot_start.date()
+
+        # Check if this day is already at capacity
+        if daily_used.get(current_day, 0) >= max_daily_minutes:
+            slot_idx += 1
+            cur_start = None
+            continue
+
         if cur_start is None or cur_start < slot_start:
             cur_start = slot_start
 
-        # if no room, move to next slot
         if cur_start >= slot_end:
             slot_idx += 1
             cur_start = None
@@ -117,17 +128,24 @@ def schedule_tasks_into_slots(
         dur = timedelta(minutes=task.minutes)
         task_end = cur_start + dur
 
+        remaining_today = max_daily_minutes - daily_used.get(current_day, 0)
+        if task.minutes > remaining_today:
+            slot_idx += 1
+            cur_start = None
+            continue
+
         if task_end <= slot_end:
             scheduled.append({
                 "title": task.title,
                 "notes": task.notes,
+                "resources": getattr(task, "resources", []),
                 "start": cur_start,
                 "end": task_end,
             })
+            daily_used[current_day] = daily_used.get(current_day, 0) + task.minutes
             tasks.pop(0)
             cur_start = task_end + padding
         else:
-            # task doesn't fit this slot -> next slot
             slot_idx += 1
             cur_start = None
 

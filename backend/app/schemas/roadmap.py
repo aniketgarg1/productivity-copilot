@@ -4,6 +4,13 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
 Difficulty = Literal["easy", "medium", "hard"]
+ResourceType = Literal["article", "video", "course", "docs", "tool", "exercise"]
+
+
+class TaskResource(BaseModel):
+    title: str
+    url: str
+    type: ResourceType
 
 
 class RoadmapTask(BaseModel):
@@ -11,6 +18,7 @@ class RoadmapTask(BaseModel):
     estimate_minutes: int = Field(..., ge=0)
     difficulty: Difficulty
     notes: Optional[str] = None
+    resources: List[TaskResource] = Field(default_factory=list)
 
 
 class RoadmapMilestone(BaseModel):

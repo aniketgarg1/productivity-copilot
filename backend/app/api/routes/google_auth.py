@@ -14,7 +14,8 @@ router = APIRouter(prefix="/auth/google")
 
 def _serializer():
     return URLSafeSerializer(settings.SESSION_SECRET, salt="google-oauth-state")
-
+def _user_serializer():
+    return URLSafeSerializer(settings.SESSION_SECRET, salt="pc-user-session")
 
 @router.get("/start")
 async def start_google_oauth(response: Response):
@@ -22,17 +23,16 @@ async def start_google_oauth(response: Response):
 
     state = secrets.token_urlsafe(24)
     auth_url, _ = flow.authorization_url(
-        access_type="offline",
-        include_granted_scopes="true",
-        prompt="consent",
-        state=state,
-    )
+    access_type="offline",
+    include_granted_scopes="true",
+    prompt="consent",
+    state=state,
+    )   
 
     signed = _serializer().dumps({"state": state})
     response.set_cookie("oauth_state", signed, httponly=True, samesite="lax")
     return {"auth_url": auth_url}
-
-
+    
 @router.get("/callback")
 async def google_oauth_callback(
     request: Request,
@@ -62,19 +62,38 @@ async def google_oauth_callback(
     email = await fetch_user_email(creds.token)
     token_json = creds_to_json(creds)
 
-    existing = db.query(GoogleToken).filter(GoogleToken.email == email).first()
-    if existing:
-        existing.token_json = token_json
-    else:
-        db.add(GoogleToken(email=email, token_json=token_json))
+    # DEV MODE: keep a single active token so the rest of the app doesn't accidentally use an old one
+    db.query(GoogleToken).delete()
+    db.add(GoogleToken(email=email, token_json=token_json))
     db.commit()
 
-    resp = Response(content="Google account connected. You can close this tab.")
+    from fastapi.responses import RedirectResponse
+
+    frontend_url = "http://localhost:3000/dashboard"
+    resp = RedirectResponse(url=frontend_url, status_code=302)
     resp.delete_cookie("oauth_state")
+
+    signed_user = _user_serializer().dumps({"email": email})
+    resp.set_cookie(
+        "pc_user",
+        signed_user,
+        httponly=True,
+        samesite="lax",
+    )
     return resp
 
 
 @router.get("/status")
-def status(db: Session = Depends(get_db)):
-    tok = db.query(GoogleToken).first()
-    return {"connected": bool(tok), "email": tok.email if tok else None}
+def status(request: Request, db: Session = Depends(get_db)):
+    cookie = request.cookies.get("pc_user")
+    if not cookie:
+        return {"connected": False, "email": None}
+
+    try:
+        data = _user_serializer().loads(cookie)
+        email = data.get("email")
+    except Exception:
+        return {"connected": False, "email": None}
+
+    tok = db.query(GoogleToken).filter(GoogleToken.email == email).first()
+    return {"connected": bool(tok), "email": email if tok else None}

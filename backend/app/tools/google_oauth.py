@@ -3,15 +3,14 @@ from urllib.parse import urljoin
 
 import httpx
 from google_auth_oauthlib.flow import Flow
+
 from app.core.config import settings
 
 SCOPES = [
     "openid",
     "email",
     "profile",
-    "https://www.googleapis.com/auth/calendar",
-    # later:
-    # "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/calendar",  # read/write
 ]
 
 
@@ -30,8 +29,15 @@ def _client_config():
 
 
 def build_flow() -> Flow:
-    redirect_uri = urljoin(settings.BACKEND_URL, settings.GOOGLE_REDIRECT_PATH.lstrip("/"))
-    return Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=redirect_uri)
+    redirect_uri = urljoin(
+        settings.BACKEND_URL,
+        settings.GOOGLE_REDIRECT_PATH.lstrip("/"),
+    )
+    return Flow.from_client_config(
+        _client_config(),
+        scopes=SCOPES,
+        redirect_uri=redirect_uri,
+    )
 
 
 async def fetch_user_email(access_token: str) -> str:

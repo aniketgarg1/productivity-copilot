@@ -89,13 +89,16 @@ jobs:
         # Fails if someone changed a model without generating a migration.
         run: alembic check
 
-      - name: A pre-Alembic database is adopted, not clobbered
+      - name: An old pre-Alembic database is adopted, not clobbered
+        # Simulates a database from the create_all() era: baseline tables, no
+        # alembic_version, and none of the columns later migrations add.
         run: |
           python - <<'PY'
           from sqlalchemy import text
           from app.db.session import engine
           with engine.begin() as c:
               c.execute(text("DROP TABLE IF EXISTS alembic_version"))
+              c.execute(text("ALTER TABLE task_records DROP COLUMN IF EXISTS last_synced_at"))
               c.execute(text(
                   "INSERT INTO user_profiles (email, daily_checkin_enabled, "
                   "preferred_checkin_hour, timezone) "
@@ -107,11 +110,37 @@ jobs:
           from sqlalchemy import text
           from app.db.session import engine
           with engine.connect() as c:
-              rows = c.execute(text(
+              survived = c.execute(text(
                   "SELECT count(*) FROM user_profiles WHERE email = 'legacy@example.com'"
               )).scalar()
-          assert rows == 1, "pre-Alembic data was lost during adoption"
-          print("legacy row survived adoption")
+              column = c.execute(text(
+                  "SELECT count(*) FROM information_schema.columns "
+                  "WHERE table_name='task_records' AND column_name='last_synced_at'"
+              )).scalar()
+          assert survived == 1, "pre-Alembic data was lost during adoption"
+          assert column == 1, "outstanding migration was not applied after adoption"
+          print("old schema adopted, data kept, migration applied")
+          PY
+
+      - name: An unstamped but already-current database is adopted
+        # A database whose tables are current but which has no Alembic history:
+        # stamping the baseline here would replay migrations that add columns
+        # it already has.
+        run: |
+          python - <<'PY'
+          from sqlalchemy import text
+          from app.db.session import engine
+          with engine.begin() as c:
+              c.execute(text("DROP TABLE IF EXISTS alembic_version"))
+          PY
+          python scripts/migrate.py
+          python - <<'PY'
+          from sqlalchemy import text
+          from app.db.session import engine
+          with engine.connect() as c:
+              version = c.execute(text("SELECT version_num FROM alembic_version")).scalar()
+          assert version, "database was not stamped"
+          print("current-but-unstamped schema adopted at", version)
           PY
 
   docker:

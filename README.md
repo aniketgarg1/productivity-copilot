@@ -140,20 +140,36 @@ Check the `calls` and `tasks` API routes (and DB tables) for persisted history.
 
 ## Frontend
 
-The `frontend` directory is currently **empty** — the UI lives in a separate
-repo and is not checked in here.
-
-- The backend allows CORS from `FRONTEND_URL` (default `http://localhost:3000`),
-  so a local dev UI can call the API.
-- The UI must send credentials (`fetch(url, { credentials: "include" })`) —
-  authentication is a signed `pc_user` cookie, so requests without it get a 401.
-- After OAuth the backend redirects to `${FRONTEND_URL}/dashboard`.
-
-To wire up a UI repo as a submodule:
+A **Next.js 16** app (App Router, TypeScript, no CSS framework) lives in
+`frontend/`.
 
 ```bash
-git submodule add <frontend-repo-url> frontend
+cd frontend && npm install && npm run dev
 ```
+
+Then open **http://localhost:3000**. Configuration is one variable —
+`NEXT_PUBLIC_API_URL`, defaulting to `http://localhost:8000` (see
+`frontend/.env.example`).
+
+| Route | What it does |
+| --- | --- |
+| `/` | Connect Google Calendar; reports any missing backend configuration |
+| `/goals/new` | Conversational intake, then builds and books the roadmap |
+| `/dashboard` | Tasks grouped by goal — tick off, skip, delete, sync |
+| `/calendar` | Week view of everything Copilot booked |
+| `/progress` | Streak, completion rate, 30-day history, status breakdown |
+| `/checkins` | Call history, phone settings, "call me now" |
+
+Notes for anyone working on it:
+
+- Auth is the signed `pc_user` cookie, so **every** request goes through
+  `lib/api.ts`, which sets `credentials: "include"`. A plain `fetch` will 401.
+- The backend stores naive UTC timestamps. `lib/format.ts` appends the `Z`
+  before parsing — without it the browser reads them as local and every task
+  shifts by your UTC offset.
+- Pages are client components because the session cookie lives in the browser;
+  a server component can't forward it to a different origin.
+- Rate limits surface as `429`; `ApiError` carries `retryAfterSeconds`.
 
 ---
 

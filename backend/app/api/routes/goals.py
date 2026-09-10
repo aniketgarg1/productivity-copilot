@@ -1,6 +1,7 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from app.api.ratelimit import planning_limiter
 from app.llm.factory import get_llm
 from app.agents.planner import make_roadmap, run_intake_conversation
 
@@ -12,7 +13,7 @@ class GoalTextRequest(BaseModel):
     horizon_days: int = Field(30, ge=1, le=365)
 
 
-@router.post("/text")
+@router.post("/text", dependencies=[Depends(planning_limiter.dependency())])
 async def goals_text(req: GoalTextRequest):
     llm = get_llm()
     roadmap = await make_roadmap(llm, req.goal, req.horizon_days)
@@ -28,7 +29,7 @@ class IntakeChatRequest(BaseModel):
     messages: list[IntakeMessage]
 
 
-@router.post("/intake")
+@router.post("/intake", dependencies=[Depends(planning_limiter.dependency())])
 async def goal_intake(req: IntakeChatRequest):
     """
     Conversational goal intake. The AI asks questions to deeply understand

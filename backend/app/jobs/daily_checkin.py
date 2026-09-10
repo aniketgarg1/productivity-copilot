@@ -11,7 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from zoneinfo import ZoneInfo
 
 from app.core.config import settings
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, engine
 from app.db.models import GoogleToken, UserProfile, TaskRecord, CallLog
 from app.tools.twilio_caller import initiate_checkin_call
 from app.tools.google_calendar import freebusy
@@ -146,10 +146,53 @@ def _run_daily_checkins():
         db.close()
 
 
+# Held for the process lifetime by whichever worker wins the election.
+_leader_connection = None
+
+# Arbitrary constant; just needs to be stable and unique to this job.
+_LEADER_LOCK_KEY = 8412779301
+
+
+def _claim_scheduler_leadership() -> bool:
+    """
+    Only one process may run the check-in job.
+
+    Under gunicorn every worker imports the app, so without this each worker
+    would place its own call and the user's phone would ring N times. A
+    Postgres session-level advisory lock is held for as long as the winning
+    worker lives, and is released automatically if it dies.
+    """
+    global _leader_connection
+
+    if not engine.url.get_backend_name().startswith("postgresql"):
+        # SQLite (tests, single-process dev) — nothing to coordinate.
+        return True
+
+    try:
+        connection = engine.connect()
+        won = connection.exec_driver_sql(
+            "SELECT pg_try_advisory_lock(%s)", (_LEADER_LOCK_KEY,)
+        ).scalar()
+    except Exception:
+        logger.exception("Could not run scheduler leader election — not scheduling here")
+        return False
+
+    if won:
+        _leader_connection = connection  # keep the session (and the lock) alive
+        return True
+
+    connection.close()
+    return False
+
+
 def start_scheduler():
     """Start the background scheduler — called once at app startup."""
     if not settings.DAILY_CHECKIN_ENABLED:
         logger.info("Daily check-in scheduler disabled")
+        return
+
+    if not _claim_scheduler_leadership():
+        logger.info("Another worker owns the check-in scheduler — standing by")
         return
 
     # Cron at :00 rather than a 1-hour interval: an interval job is phased to
@@ -168,5 +211,12 @@ def start_scheduler():
 
 
 def stop_scheduler():
+    global _leader_connection
+
     if scheduler.running:
         scheduler.shutdown(wait=False)
+
+    if _leader_connection is not None:
+        # Releases the advisory lock so another worker can take over.
+        _leader_connection.close()
+        _leader_connection = None

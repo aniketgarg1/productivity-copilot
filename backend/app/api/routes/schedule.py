@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_email, get_google_token
+from app.api.ratelimit import planning_limiter
 from app.core.config import settings
 from app.db.session import get_db
 from app.db.models import UserProfile, TaskRecord
@@ -39,7 +40,11 @@ class ScheduleRequest(BaseModel):
     daily_hours: float = Field(2.0, ge=0.5, le=12, description="Max hours per day to dedicate to tasks")
 
 
-@router.post("/schedule", response_model=ScheduleResponse)
+@router.post(
+    "/schedule",
+    response_model=ScheduleResponse,
+    dependencies=[Depends(planning_limiter.dependency())],
+)
 async def schedule_goal(req: ScheduleRequest, request: Request, db: Session = Depends(get_db)):
     email = get_current_email(request)
     tok = get_google_token(db, email)

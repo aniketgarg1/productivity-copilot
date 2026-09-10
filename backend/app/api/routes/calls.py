@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from zoneinfo import ZoneInfo
 
 from app.api.deps import get_current_email
+from app.api.ratelimit import call_limiter
 from app.db.session import get_db
 from app.db.models import GoogleToken, UserProfile, TaskRecord, CallLog
 from app.agents.checkin_agent import generate_checkin_greeting, generate_followup, generate_motivation
@@ -183,7 +184,7 @@ async def call_status(
     return {"ok": True}
 
 
-@router.post("/trigger")
+@router.post("/trigger", dependencies=[Depends(call_limiter.dependency())])
 async def trigger_checkin_call(request: Request, db: Session = Depends(get_db)):
     """
     Trigger a check-in call for the signed-in user (useful for testing).

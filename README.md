@@ -157,21 +157,76 @@ git submodule add <frontend-repo-url> frontend
 
 ---
 
+## Database migrations
+
+Schema is owned by **Alembic**, not by `create_all()`. The Docker entrypoint runs
+migrations before the API starts, so `docker compose up` is all you normally need.
+
+An existing database created by an older build is adopted automatically: the
+bootstrap stamps the baseline revision instead of replaying it, so **no data is
+lost**. Running it by hand:
+
+```bash
+cd backend && python scripts/migrate.py
+```
+
+After changing a model, generate a migration and commit it:
+
+```bash
+cd backend && alembic revision --autogenerate -m "what changed"
+```
+
+CI runs `alembic check` and fails if a model was changed without a migration.
+
+---
+
+## Running the tests
+
+```bash
+cd backend && pip install -r requirements-dev.txt && python -m pytest
+```
+
+They use SQLite and stub out Google, Twilio and OpenAI — no network, no keys, no
+containers. GitHub Actions runs the same suite plus a migration round-trip
+against real Postgres and a container smoke test.
+
+---
+
+## Task ↔ calendar sync
+
+Moving or deleting an event in Google is otherwise invisible to the app, so
+stored times go stale and check-in calls cite the wrong hour.
+
+| Endpoint | What it does |
+| --- | --- |
+| `POST /tasks/sync` | Reconciles stored tasks against Google. Moved events update the stored time; deleted events unschedule the task without discarding it. |
+| `PATCH /tasks/{id}/reschedule` | Moves a task, updating Google Calendar too. If Google rejects the change, the database is left untouched rather than recording a time that doesn't exist. |
+| `DELETE /tasks/{id}` | Deletes the task and removes its calendar event. |
+
+---
+
+## Rate limits
+
+The endpoints that spend money are throttled per user: goal planning
+(10 / 5 min), chat (30 / min), transcription (15 / 5 min), check-in calls
+(3 / 10 min). Exceeding one returns `429` with a `Retry-After` header. The
+counters are in-process — move them to Redis if you run more than one container.
+
+---
+
 ## Known limitations
 
-- **No database migrations.** Tables are created with `create_all()` at startup,
-  so changing a model won't alter an existing table. For a dev reset:
-  `docker compose down -v && docker compose up --build`.
 - **Session cookies never expire server-side.** There's no revocation list; the
   cookie is valid for 30 days or until `SESSION_SECRET` changes.
 - **Resource links are picked from a fixed allow-list** of base URLs in
   `backend/app/agents/planner.py` to stop the model inventing dead links.
+- **The check-in scheduler elects a leader** via a Postgres advisory lock, so
+  only one worker places calls. On SQLite there's no election — run one process.
 
 ---
 
 ## Suggested next steps
 
-- **Add Alembic** for real schema migrations before storing anything you care about.
 - **Polish the planner & scheduler**: tune prompts, task sizes, and daily time budgets based on your own usage.
 - **Harden auth & security**: production OAuth settings, `DEV_MODE=false`, and HTTPS in front of the API.
 - **Deploy**: containerize and deploy the stack (e.g. Fly.io, Railway, Render, or a small VPS) with a managed Postgres instance.

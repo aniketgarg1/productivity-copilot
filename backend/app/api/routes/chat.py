@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.db.models import UserProfile, TaskRecord
 from app.api.deps import get_current_email
+from app.api.ratelimit import chat_limiter
 from app.llm.factory import get_llm
 
 router = APIRouter(prefix="/chat")
@@ -22,7 +23,7 @@ class ChatRequest(BaseModel):
     history: list[ChatMessage] = []
 
 
-@router.post("")
+@router.post("", dependencies=[Depends(chat_limiter.dependency())])
 async def chat(body: ChatRequest, request: Request, db: Session = Depends(get_db)):
     """Send a message to the AI assistant with the user's tasks as context."""
     email = get_current_email(request)

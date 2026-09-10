@@ -1,5 +1,6 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
+gunicorn==23.0.0
 
 pydantic-settings==2.5.2
 python-dotenv==1.0.1
@@ -9,6 +10,7 @@ python-multipart==0.0.9
 
 sqlalchemy==2.0.34
 psycopg2-binary==2.9.9
+alembic==1.13.2
 
 google-auth==2.35.0
 google-auth-oauthlib==1.2.1

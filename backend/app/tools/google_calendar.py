@@ -145,6 +145,77 @@ def create_event(
     return {"id": created.get("id"), "htmlLink": created.get("htmlLink")}
 
 
+COPILOT_TASK_KEY = "productivity_copilot_task_id"
+
+
+def event_task_id(event: dict) -> str | None:
+    """The Copilot task id stamped on an event, if it is one of ours."""
+    return ((event.get("extendedProperties") or {}).get("private") or {}).get(COPILOT_TASK_KEY)
+
+
+def parse_event_times(event: dict) -> tuple[datetime | None, datetime | None]:
+    """
+    Read an event's start/end as datetimes.
+
+    All-day events carry `date` instead of `dateTime`; treat those as unscheduled
+    rather than guessing a time.
+    """
+    def _one(side: str) -> datetime | None:
+        raw = (event.get(side) or {}).get("dateTime")
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            logger.warning("Unparseable %s on event %s: %r", side, event.get("id"), raw)
+            return None
+
+    return _one("start"), _one("end")
+
+
+def update_event(
+    event_id: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    timezone_name: str,
+    token_json: str | None = None,
+    service=None,
+) -> dict:
+    """Move an existing event. Only the times are touched."""
+    if service is None:
+        if not token_json:
+            raise ValueError("update_event requires either a service or token_json")
+        service = build_calendar_service(token_json)
+
+    body = {
+        "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone_name},
+        "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone_name},
+    }
+    updated = service.events().patch(calendarId="primary", eventId=event_id, body=body).execute()
+    return {"id": updated.get("id"), "htmlLink": updated.get("htmlLink")}
+
+
+def delete_event(event_id: str, token_json: str | None = None, service=None) -> bool:
+    """
+    Delete an event. Returns False when it was already gone, which is a
+    success for our purposes, not an error.
+    """
+    from googleapiclient.errors import HttpError
+
+    if service is None:
+        if not token_json:
+            raise ValueError("delete_event requires either a service or token_json")
+        service = build_calendar_service(token_json)
+
+    try:
+        service.events().delete(calendarId="primary", eventId=event_id).execute()
+        return True
+    except HttpError as exc:
+        if exc.resp.status in (404, 410):
+            return False
+        raise
+
+
 def list_events(
     time_min_iso: str,
     time_max_iso: str,

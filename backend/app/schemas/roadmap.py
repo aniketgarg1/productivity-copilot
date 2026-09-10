@@ -44,6 +44,9 @@ class CalendarEventOut(BaseModel):
     title: str
     start: str
     end: str
+    # Without this the response model silently drops task_id, leaving the
+    # client no way to match a calendar event back to its task record.
+    task_id: Optional[str] = None
 
 
 class ScheduleResponse(BaseModel):

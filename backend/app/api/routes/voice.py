@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from openai import AsyncOpenAI
 from sqlalchemy.orm import Session
 
+from app.api.ratelimit import transcription_limiter
 from app.core.config import settings
 from app.db.session import get_db
 
@@ -57,7 +58,7 @@ async def _transcribe(audio: UploadFile) -> str:
         os.unlink(tmp_path)
 
 
-@router.post("/transcribe")
+@router.post("/transcribe", dependencies=[Depends(transcription_limiter.dependency())])
 async def transcribe_audio(audio: UploadFile = File(...)):
     """Transcribe audio to text — useful for previewing before scheduling."""
     text = await _transcribe(audio)
@@ -66,7 +67,7 @@ async def transcribe_audio(audio: UploadFile = File(...)):
     return {"text": text}
 
 
-@router.post("/goal")
+@router.post("/goal", dependencies=[Depends(transcription_limiter.dependency())])
 async def voice_goal(
     request: Request,
     audio: UploadFile = File(...),

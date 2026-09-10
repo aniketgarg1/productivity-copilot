@@ -1,31 +1,36 @@
 from __future__ import annotations
 from typing import Any, Dict, List
 
+# NOTE: OpenAI Structured Outputs rejects several JSON Schema keywords
+# (minimum/maximum/minItems/maxItems) on many models — including the
+# gpt-4.1-mini/nano defaults — with a 400. Ranges are enforced in
+# normalize_roadmap() below instead of in the schema.
+MIN_TASK_MINUTES = 10
+MAX_TASK_MINUTES = 480
+
 ROADMAP_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
         "goal": {"type": "string"},
-        "time_horizon_days": {"type": "integer", "minimum": 1, "maximum": 3650},
+        "time_horizon_days": {"type": "integer"},
         "milestones": {
             "type": "array",
-            "minItems": 1,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
                     "title": {"type": "string"},
                     "why_it_matters": {"type": "string"},
-                    "due_in_days": {"type": "integer", "minimum": 1, "maximum": 3650},
+                    "due_in_days": {"type": "integer"},
                     "tasks": {
                         "type": "array",
-                        "minItems": 1,
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
                             "properties": {
                                 "title": {"type": "string"},
-                                "estimate_minutes": {"type": "integer", "minimum": 10, "maximum": 480},
+                                "estimate_minutes": {"type": "integer"},
                                 "difficulty": {"type": "string", "enum": ["easy", "medium", "hard"]},
                                 "notes": {"type": "string"},
                                 "resources": {
@@ -52,6 +57,70 @@ ROADMAP_SCHEMA: Dict[str, Any] = {
     },
     "required": ["goal", "time_horizon_days", "milestones"],
 }
+
+
+def normalize_roadmap(roadmap: Dict[str, Any], goal_text: str, horizon_days: int) -> Dict[str, Any]:
+    """
+    Clamp and backfill model output so downstream code can trust it.
+
+    The model is not bound by minimum/maximum any more (see note above), and it
+    occasionally omits optional-looking fields, so anything the scheduler and
+    the response model depend on is normalized here.
+    """
+    roadmap = dict(roadmap or {})
+    roadmap["goal"] = (roadmap.get("goal") or goal_text).strip() or goal_text
+
+    try:
+        horizon = int(roadmap.get("time_horizon_days") or horizon_days)
+    except (TypeError, ValueError):
+        horizon = horizon_days
+    roadmap["time_horizon_days"] = max(1, min(horizon, 3650))
+
+    milestones = []
+    for ms in roadmap.get("milestones") or []:
+        if not isinstance(ms, dict):
+            continue
+
+        try:
+            due = int(ms.get("due_in_days") or roadmap["time_horizon_days"])
+        except (TypeError, ValueError):
+            due = roadmap["time_horizon_days"]
+
+        tasks = []
+        for t in ms.get("tasks") or []:
+            if not isinstance(t, dict) or not (t.get("title") or "").strip():
+                continue
+
+            try:
+                minutes = int(t.get("estimate_minutes") or MIN_TASK_MINUTES)
+            except (TypeError, ValueError):
+                minutes = MIN_TASK_MINUTES
+
+            resources = [
+                r for r in (t.get("resources") or [])
+                if isinstance(r, dict) and r.get("title") and r.get("url")
+            ]
+
+            tasks.append({
+                "title": t["title"].strip(),
+                "estimate_minutes": max(MIN_TASK_MINUTES, min(minutes, MAX_TASK_MINUTES)),
+                "difficulty": t.get("difficulty") if t.get("difficulty") in ("easy", "medium", "hard") else "medium",
+                "notes": t.get("notes") or "",
+                "resources": resources,
+            })
+
+        if not tasks:
+            continue
+
+        milestones.append({
+            "title": (ms.get("title") or "Milestone").strip(),
+            "why_it_matters": (ms.get("why_it_matters") or "").strip(),
+            "due_in_days": max(1, min(due, 3650)),
+            "tasks": tasks,
+        })
+
+    roadmap["milestones"] = milestones
+    return roadmap
 
 
 async def make_roadmap(llm, goal_text: str, horizon_days: int = 30, context: str = "") -> Dict[str, Any]:
@@ -105,7 +174,7 @@ async def make_roadmap(llm, goal_text: str, horizon_days: int = 30, context: str
         user_prompt += f"Background about the user:\n{context}\n\n"
     user_prompt += f"Goal: {goal_text}\nTime horizon (days): {horizon_days}\n\nReturn ONLY valid JSON that matches the provided schema."
 
-    return await llm.generate_json(
+    raw = await llm.generate_json(
         system=system,
         user=user_prompt,
         schema_name="goal_roadmap",
@@ -113,6 +182,7 @@ async def make_roadmap(llm, goal_text: str, horizon_days: int = 30, context: str
         strict=True,
         temperature=0.3,
     )
+    return normalize_roadmap(raw, goal_text, horizon_days)
 
 
 INTAKE_QUESTIONS = [

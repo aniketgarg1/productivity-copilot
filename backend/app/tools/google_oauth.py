@@ -1,5 +1,4 @@
 import json
-from urllib.parse import urljoin
 
 import httpx
 from google_auth_oauthlib.flow import Flow
@@ -8,8 +7,8 @@ from app.core.config import settings
 
 SCOPES = [
     "openid",
-    "email",
-    "profile",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
     "https://www.googleapis.com/auth/calendar",  # read/write
 ]
 
@@ -29,14 +28,10 @@ def _client_config():
 
 
 def build_flow() -> Flow:
-    redirect_uri = urljoin(
-        settings.BACKEND_URL,
-        settings.GOOGLE_REDIRECT_PATH.lstrip("/"),
-    )
     return Flow.from_client_config(
         _client_config(),
         scopes=SCOPES,
-        redirect_uri=redirect_uri,
+        redirect_uri=settings.google_redirect_uri,
     )
 
 
@@ -47,7 +42,11 @@ async def fetch_user_email(access_token: str) -> str:
             headers={"Authorization": f"Bearer {access_token}"},
         )
         r.raise_for_status()
-        return r.json().get("email", "unknown@example.com")
+        email = r.json().get("email")
+
+    if not email:
+        raise RuntimeError("Google did not return an email for this account")
+    return email
 
 
 def creds_to_json(creds) -> str:
@@ -58,5 +57,8 @@ def creds_to_json(creds) -> str:
         "client_id": creds.client_id,
         "client_secret": creds.client_secret,
         "scopes": list(creds.scopes) if creds.scopes else [],
+        # Without expiry, Credentials.expired is always False and the access
+        # token is never refreshed — every Calendar call 401s after ~1 hour.
+        "expiry": creds.expiry.isoformat() if getattr(creds, "expiry", None) else None,
     }
     return json.dumps(payload)

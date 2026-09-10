@@ -3,28 +3,41 @@
 import os
 import tempfile
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from openai import AsyncOpenAI
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.db.session import get_db
 
 router = APIRouter(prefix="/voice")
 
 ALLOWED_AUDIO_TYPES = {
-    "audio/wav", "audio/mpeg", "audio/mp3", "audio/mp4",
-    "audio/webm", "audio/ogg", "audio/flac", "audio/m4a",
+    "audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3", "audio/mp4",
+    "audio/webm", "audio/ogg", "audio/flac", "audio/m4a", "audio/x-m4a",
+    "video/webm",  # what MediaRecorder produces in some browsers
 }
 MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB (Whisper limit)
 
 
 async def _transcribe(audio: UploadFile) -> str:
-    from openai import OpenAI
-
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
+    if not settings.OPENAI_API_KEY:
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
 
+    content_type = (audio.content_type or "").split(";")[0].strip().lower()
+    if content_type and content_type not in ALLOWED_AUDIO_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported audio type {content_type!r}. Allowed: {', '.join(sorted(ALLOWED_AUDIO_TYPES))}",
+        )
+
+    # Reject oversized uploads before buffering the whole body in memory.
+    if audio.size is not None and audio.size > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="Audio file exceeds 25 MB limit")
+
     content = await audio.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty audio upload")
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=413, detail="Audio file exceeds 25 MB limit")
 
@@ -34,9 +47,11 @@ async def _transcribe(audio: UploadFile) -> str:
         tmp_path = tmp.name
 
     try:
-        client = OpenAI(api_key=api_key)
+        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY, timeout=120.0)
         with open(tmp_path, "rb") as f:
-            transcript = client.audio.transcriptions.create(model="whisper-1", file=f)
+            transcript = await client.audio.transcriptions.create(
+                model=settings.OPENAI_TRANSCRIBE_MODEL, file=f
+            )
         return transcript.text
     finally:
         os.unlink(tmp_path)
@@ -53,9 +68,10 @@ async def transcribe_audio(audio: UploadFile = File(...)):
 
 @router.post("/goal")
 async def voice_goal(
+    request: Request,
     audio: UploadFile = File(...),
     horizon_days: int = Form(30),
-    request: Request = None,
+    daily_hours: float = Form(2.0),
     db: Session = Depends(get_db),
 ):
     """
@@ -63,13 +79,16 @@ async def voice_goal(
     generate a roadmap, and schedule tasks on Google Calendar.
     Reuses the existing schedule pipeline.
     """
+    from app.api.routes.schedule import schedule_goal, ScheduleRequest
+
     text = await _transcribe(audio)
     if not text or not text.strip():
         raise HTTPException(status_code=422, detail="Could not transcribe any speech from the audio")
 
-    from app.api.routes.schedule import schedule_goal, ScheduleRequest
-
-    fake_req = ScheduleRequest(goal=text, horizon_days=horizon_days)
-    result = await schedule_goal(fake_req, request, db)
+    result = await schedule_goal(
+        ScheduleRequest(goal=text.strip(), horizon_days=horizon_days, daily_hours=daily_hours),
+        request,
+        db,
+    )
 
     return {"transcription": text, **result}

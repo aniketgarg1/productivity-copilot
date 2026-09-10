@@ -1,12 +1,12 @@
 """Chat endpoint — conversational assistant with task context."""
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.db.models import UserProfile, TaskRecord
-from app.api.routes.schedule import _get_current_email
+from app.api.deps import get_current_email
 from app.llm.factory import get_llm
 
 router = APIRouter(prefix="/chat")
@@ -25,7 +25,7 @@ class ChatRequest(BaseModel):
 @router.post("")
 async def chat(body: ChatRequest, request: Request, db: Session = Depends(get_db)):
     """Send a message to the AI assistant with the user's tasks as context."""
-    email = _get_current_email(request)
+    email = get_current_email(request)
 
     profile = db.query(UserProfile).filter(UserProfile.email == email).first()
     tasks_context = ""

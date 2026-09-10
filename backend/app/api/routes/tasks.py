@@ -7,7 +7,7 @@ from typing import Literal
 
 from app.db.session import get_db
 from app.db.models import UserProfile, TaskRecord
-from app.api.routes.schedule import _get_current_email
+from app.api.deps import get_current_email
 
 router = APIRouter(prefix="/tasks")
 
@@ -32,7 +32,7 @@ async def list_tasks(
     status: str | None = None,
 ):
     """List all tasks for the current user, optionally filtered by status."""
-    email = _get_current_email(request)
+    email = get_current_email(request)
     profile = db.query(UserProfile).filter(UserProfile.email == email).first()
     if not profile:
         return {"tasks": []}
@@ -70,7 +70,7 @@ async def update_task_status(
     db: Session = Depends(get_db),
 ):
     """Update the status of a task (pending, in_progress, done, skipped)."""
-    email = _get_current_email(request)
+    email = get_current_email(request)
     profile = db.query(UserProfile).filter(UserProfile.email == email).first()
     if not profile:
         raise HTTPException(status_code=404, detail="User profile not found")
@@ -97,7 +97,7 @@ async def register_phone(
     db: Session = Depends(get_db),
 ):
     """Register or update the user's phone number for daily check-in calls."""
-    email = _get_current_email(request)
+    email = get_current_email(request)
 
     profile = db.query(UserProfile).filter(UserProfile.email == email).first()
     if profile:

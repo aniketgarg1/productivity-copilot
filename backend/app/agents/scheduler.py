@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, time, date
 from typing import List, Tuple, Dict, Any
 from zoneinfo import ZoneInfo
 
 from app.core.config import settings
+
+UTC = ZoneInfo("UTC")
+
+# Google's free/busy query degrades over very long ranges, so ask in chunks.
+FREEBUSY_CHUNK_DAYS = 60
 
 
 @dataclass
@@ -13,6 +18,10 @@ class Task:
     title: str
     minutes: int
     notes: str
+    milestone_title: str = ""
+    index: int = 0
+    resources: List[Dict[str, Any]] = field(default_factory=list)
+    task_id: str | None = None
 
 
 def _parse_busy(resp: Dict[str, Any]) -> List[Tuple[datetime, datetime]]:
@@ -75,13 +84,16 @@ def flatten_tasks(roadmap: Dict[str, Any]) -> List[Task]:
     tasks: List[Task] = []
     for ms in roadmap.get("milestones", []):
         for t in ms.get("tasks", []):
-            task = Task(
-                title=t["title"],
-                minutes=int(t["estimate_minutes"]),
-                notes=t.get("notes", ""),
+            tasks.append(
+                Task(
+                    title=t["title"],
+                    minutes=int(t["estimate_minutes"]),
+                    notes=t.get("notes", "") or "",
+                    milestone_title=ms.get("title", "") or "",
+                    index=len(tasks),
+                    resources=t.get("resources", []) or [],
+                )
             )
-            task.resources = t.get("resources", [])
-            tasks.append(task)
     return tasks
 
 
@@ -90,28 +102,32 @@ def schedule_tasks_into_slots(
     free_slots_by_day: List[Tuple[datetime, datetime]],
     timezone: str,
     max_daily_minutes: int = 120,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], List[Task]]:
     """
     First-fit scheduling with a daily time cap.
     Spreads tasks across days so users aren't overloaded.
+
+    Returns (scheduled, unscheduled). The caller's ``tasks`` list is not modified.
     """
     tz = ZoneInfo(timezone)
     padding = timedelta(minutes=settings.SLOT_PADDING_MINUTES)
 
-    scheduled = []
+    pending = list(tasks)  # never mutate the caller's list
+    scheduled: List[Dict[str, Any]] = []
     slot_idx = 0
     cur_start = None
     daily_used: Dict[date, int] = {}
 
-    while tasks and slot_idx < len(free_slots_by_day):
+    while pending and slot_idx < len(free_slots_by_day):
         slot_start, slot_end = free_slots_by_day[slot_idx]
         slot_start = slot_start.astimezone(tz)
         slot_end = slot_end.astimezone(tz)
 
         current_day = slot_start.date()
+        used_today = daily_used.get(current_day, 0)
 
-        # Check if this day is already at capacity
-        if daily_used.get(current_day, 0) >= max_daily_minutes:
+        # Day already at capacity — move on.
+        if used_today >= max_daily_minutes:
             slot_idx += 1
             cur_start = None
             continue
@@ -124,12 +140,16 @@ def schedule_tasks_into_slots(
             cur_start = None
             continue
 
-        task = tasks[0]
-        dur = timedelta(minutes=task.minutes)
-        task_end = cur_start + dur
+        task = pending[0]
+        task_end = cur_start + timedelta(minutes=task.minutes)
 
-        remaining_today = max_daily_minutes - daily_used.get(current_day, 0)
-        if task.minutes > remaining_today:
+        # A task longer than the whole daily budget would otherwise never fit and
+        # be dropped silently, so allow it to start a fresh, otherwise-empty day.
+        fits_budget = (
+            used_today == 0
+            or task.minutes <= max_daily_minutes - used_today
+        )
+        if not fits_budget:
             slot_idx += 1
             cur_start = None
             continue
@@ -138,18 +158,20 @@ def schedule_tasks_into_slots(
             scheduled.append({
                 "title": task.title,
                 "notes": task.notes,
-                "resources": getattr(task, "resources", []),
+                "resources": task.resources,
+                "milestone_title": task.milestone_title,
+                "task_id": task.task_id,
                 "start": cur_start,
                 "end": task_end,
             })
-            daily_used[current_day] = daily_used.get(current_day, 0) + task.minutes
-            tasks.pop(0)
+            daily_used[current_day] = used_today + task.minutes
+            pending.pop(0)
             cur_start = task_end + padding
         else:
             slot_idx += 1
             cur_start = None
 
-    return scheduled
+    return scheduled, pending
 
 
 def build_free_slots(
@@ -162,6 +184,9 @@ def build_free_slots(
     """
     Returns a flat list of free slots across days inside work hours.
     holidays: list of YYYY-MM-DD strings to skip
+
+    Busy times are fetched in large chunks rather than one request per day —
+    a 30-day horizon used to cost 30 round-trips to the Google Calendar API.
     """
     tz = ZoneInfo(timezone)
     holidays_set = set(holidays or [])
@@ -169,23 +194,39 @@ def build_free_slots(
     today = datetime.now(tz).date()
     padding = timedelta(minutes=settings.SLOT_PADDING_MINUTES)
 
-    all_slots: List[Tuple[datetime, datetime]] = []
+    days = [
+        today + timedelta(days=i)
+        for i in range(horizon_days)
+        if (today + timedelta(days=i)).isoformat() not in holidays_set
+    ]
+    if not days:
+        return []
 
-    for i in range(horizon_days):
-        d = today + timedelta(days=i)
-        if d.isoformat() in holidays_set:
-            continue
-
-        day_start, day_end = _day_bounds(d, tz)
-
-        # Query busy for just this day window
+    # One free/busy request per chunk of days, then slice the result per day.
+    busy_all: List[Tuple[datetime, datetime]] = []
+    for i in range(0, len(days), FREEBUSY_CHUNK_DAYS):
+        chunk = days[i:i + FREEBUSY_CHUNK_DAYS]
+        window_start, _ = _day_bounds(chunk[0], tz)
+        _, window_end = _day_bounds(chunk[-1], tz)
         resp = freebusy_func(
             token_json,
-            day_start.astimezone(ZoneInfo("UTC")).isoformat(),
-            day_end.astimezone(ZoneInfo("UTC")).isoformat(),
+            window_start.astimezone(UTC).isoformat(),
+            window_end.astimezone(UTC).isoformat(),
         )
-        busy = _parse_busy(resp)
-        slots = _free_slots_for_day(day_start, day_end, busy, padding)
-        all_slots.extend(slots)
+        busy_all.extend(_parse_busy(resp))
+
+    busy_all = _merge(sorted(busy_all, key=lambda x: x[0]))
+
+    now = datetime.now(tz)
+    all_slots: List[Tuple[datetime, datetime]] = []
+    for d in days:
+        day_start, day_end = _day_bounds(d, tz)
+        # Never hand back a slot that has already passed — today's workday may
+        # be half over by the time the user asks for a plan.
+        day_start = max(day_start, now)
+        if day_start >= day_end:
+            continue
+        day_busy = [b for b in busy_all if b[1] > day_start and b[0] < day_end]
+        all_slots.extend(_free_slots_for_day(day_start, day_end, day_busy, padding))
 
     return all_slots

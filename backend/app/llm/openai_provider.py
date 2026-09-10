@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Any, Dict
 
-from openai import OpenAI
+from openai import AsyncOpenAI
+
+from app.llm.base import LLM
 
 
 def _extract_text(resp: Any) -> str:
@@ -35,18 +36,22 @@ def _extract_text(resp: Any) -> str:
         return ""
 
 
-class OpenAILLM:
-    def __init__(self, model_main: str, model_cheap: str):
-        api_key = os.environ.get("OPENAI_API_KEY")
+class OpenAILLM(LLM):
+    def __init__(self, api_key: str, model_main: str, model_cheap: str):
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY missing in environment")
+            raise RuntimeError(
+                "OPENAI_API_KEY is not set. Add it to your .env file "
+                "(get one at https://platform.openai.com/api-keys)."
+            )
 
-        self.client = OpenAI(api_key=api_key)
+        # Async client: the sync client blocks the event loop, which stalls
+        # every other request while a completion is in flight.
+        self.client = AsyncOpenAI(api_key=api_key, timeout=90.0, max_retries=2)
         self.model_main = model_main
         self.model_cheap = model_cheap
 
     async def generate_text(self, system: str, user: str, temperature: float = 0.2) -> str:
-        resp = self.client.responses.create(
+        resp = await self.client.responses.create(
             model=self.model_main,
             input=[
                 {"role": "system", "content": system},
@@ -66,11 +71,11 @@ class OpenAILLM:
         temperature: float = 0.2,
     ) -> Dict[str, Any]:
         """
-        Structured Outputs (JSON Schema) in Responses API uses:
+        Structured Outputs (JSON Schema) in the Responses API uses:
           text={ "format": { "type": "json_schema", ... } }
         NOT response_format=...
         """
-        resp = self.client.responses.create(
+        resp = await self.client.responses.create(
             model=self.model_main,
             input=[
                 {"role": "system", "content": system},

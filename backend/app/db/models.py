@@ -46,6 +46,9 @@ class TaskRecord(Base):
     task_hash: Mapped[str | None] = mapped_column(String(16), unique=True, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")
     progress_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # When this row was last reconciled against Google Calendar. Null means it
+    # has never been checked since it was created.
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 

@@ -10,8 +10,14 @@ services:
       - ./backend/app:/app/app
     env_file:
       - .env
+    environment:
+      # Inside the compose network the DB host is "db", not localhost.
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@db:5432/copilot}
     depends_on:
-      - db
+      db:
+        # Without this the API starts before Postgres accepts connections.
+        condition: service_healthy
+    restart: unless-stopped
 
   db:
     image: postgres:16
@@ -21,9 +27,17 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5432:5432"
+      # Host port 5433 to avoid clashing with a Postgres already installed on
+      # the host. Inside the compose network the backend still uses db:5432.
+      - "${DB_HOST_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d copilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
 
 volumes:
   postgres_data:

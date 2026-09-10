@@ -3,8 +3,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import inspect
+from sqlalchemy.exc import OperationalError
 
-from app.db.base import Base
+from app.core.config import settings
 from app.db.session import engine
 from app.api.routes.google_auth import router as google_auth_router
 from app.api.routes.calendar import router as calendar_router
@@ -18,11 +20,49 @@ from app.api.routes.analytics import router as analytics_router
 from app.jobs.daily_checkin import start_scheduler, stop_scheduler
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+def _check_schema() -> None:
+    """
+    The schema is owned by Alembic (`python scripts/migrate.py`), not by the app.
+
+    Creating tables here would silently diverge from the migration history, so
+    this only reports a database that hasn't been migrated yet.
+    """
+    try:
+        tables = set(inspect(engine).get_table_names())
+    except OperationalError:
+        logger.error("Could not reach the database at startup — check DATABASE_URL.")
+        return
+
+    missing = {"google_tokens", "user_profiles", "task_records", "call_logs"} - tables
+    if missing:
+        logger.error(
+            "Database schema is missing %s. Run `python scripts/migrate.py` "
+            "(the Docker image does this automatically on start).",
+            ", ".join(sorted(missing)),
+        )
+    elif "alembic_version" not in tables:
+        logger.warning(
+            "Schema exists but is not under Alembic. Run `python scripts/migrate.py` "
+            "to adopt it — it stamps the baseline without touching your data."
+        )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
+    if settings.SESSION_SECRET in ("change-me", "change-this-to-any-random-string"):
+        logger.warning(
+            "SESSION_SECRET is still the default value — session cookies are forgeable. "
+            "Set SESSION_SECRET in .env (e.g. `python -c \"import secrets;print(secrets.token_urlsafe(32))\"`)."
+        )
+    if not settings.OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY is not set — planning, chat and voice endpoints will fail.")
+    if not (settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET):
+        logger.warning("Google OAuth is not configured — calendar features will fail.")
+
+    _check_schema()
     start_scheduler()
     yield
     stop_scheduler()
@@ -32,7 +72,7 @@ app = FastAPI(title="Productivity Copilot API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -42,6 +82,26 @@ app.add_middleware(
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/config-check")
+def config_check():
+    """Which integrations are configured. Never returns secret values."""
+    return {
+        "google_oauth": bool(settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET),
+        "google_redirect_uri": settings.google_redirect_uri,
+        "openai": bool(settings.OPENAI_API_KEY),
+        "twilio": bool(
+            settings.TWILIO_ACCOUNT_SID
+            and settings.TWILIO_AUTH_TOKEN
+            and settings.TWILIO_PHONE_NUMBER
+        ),
+        "twilio_webhooks_reachable": settings.backend_is_public,
+        "session_secret_is_default": settings.SESSION_SECRET in ("change-me", "change-this-to-any-random-string"),
+        "daily_checkin_enabled": settings.DAILY_CHECKIN_ENABLED,
+        "timezone": settings.TIMEZONE,
+        "cors_origins": settings.cors_origins,
+    }
 
 
 app.include_router(google_auth_router, tags=["auth"])

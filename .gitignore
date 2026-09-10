@@ -16,3 +16,8 @@ node_modules/
 
 # Docker
 *.log
+
+# Test artifacts
+.coverage
+.pytest_cache/
+htmlcov/
